@@ -451,7 +451,7 @@ func TestSendMail(t *testing.T) {
 To: other@example.com
 Subject: SendMail test
 SendMail is working for me.
-`, "\n", "\r\n", -1)))
+`, "\n", "\r\n", -1)), false)
 	if err == nil {
 		t.Errorf("Expected SendMail to be rejected due to a message injection attempt")
 	}
@@ -461,7 +461,7 @@ To: other@example.com
 Subject: SendMail test
 
 SendMail is working for me.
-`, "\n", "\r\n", -1)))
+`, "\n", "\r\n", -1)), false)
 
 	if err != nil {
 		t.Errorf("%v", err)
@@ -531,7 +531,7 @@ func TestSendMailWithAuth(t *testing.T) {
 To: other@example.com
 Subject: SendMail test
 SendMail is working for me.
-`, "\n", "\r\n", -1)))
+`, "\n", "\r\n", -1)), false)
 	if err == nil {
 		t.Error("SendMail: Server doesn't support AUTH, expected to get an error, but got none ")
 	}
@@ -736,7 +736,7 @@ func init() {
 func sendMail(hostPort string) error {
 	from := "joe1@example.com"
 	to := []string{"joe2@example.com"}
-	return SendMail(hostPort, nil, from, to, strings.NewReader("Subject: test\n\nhowdy!"))
+	return SendMail(hostPort, nil, from, to, strings.NewReader("Subject: test\n\nhowdy!"), false)
 }
 
 // localhostCert is a PEM-encoded TLS cert generated from src/crypto/tls:

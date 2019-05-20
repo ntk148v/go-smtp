@@ -352,7 +352,7 @@ var testHookStartTLS func(*tls.Config) // nil, except for tests
 // attachments (see the mime/multipart package), or other mail
 // functionality. Higher-level packages exist outside of the standard
 // library.
-func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader) error {
+func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader, useTLS bool) error {
 	if err := validateLine(from); err != nil {
 		return err
 	}
@@ -361,7 +361,18 @@ func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader)
 			return err
 		}
 	}
-	c, err := Dial(addr)
+
+	var c *Client
+	var err error
+
+	if useTLS {
+		tlsconfig := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		c, err = DialTLS(addr, tlsconfig)
+	} else {
+		c, err = Dial(addr)
+	}
 	if err != nil {
 		return err
 	}
