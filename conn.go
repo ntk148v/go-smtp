@@ -153,7 +153,7 @@ func (c *Conn) handle(cmd string, arg string) {
 			c.handleAuth(arg)
 		}
 	case "STARTTLS":
-		c.handleStartTLS()
+		c.handleStartTLS(arg)
 	default:
 		c.unrecognizedCommand(cmd)
 	}
@@ -576,7 +576,7 @@ func (c *Conn) handleAuth(arg string) {
 	}
 }
 
-func (c *Conn) handleStartTLS() {
+func (c *Conn) handleStartTLS(arg string) {
 	if _, isTLS := c.TLSConnectionState(); isTLS {
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Already running in TLS")
 		return
@@ -599,6 +599,8 @@ func (c *Conn) handleStartTLS() {
 
 	c.conn = tlsConn
 	c.init()
+	// Handle data
+	c.handleData(arg)
 
 	// Reset all state and close the previous Session.
 	// This is different from just calling reset() since we want the Backend to
