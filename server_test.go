@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"strings"
 	"testing"
@@ -22,7 +23,15 @@ type backend struct {
 	messages []*message
 	anonmsgs []*message
 
-	userErr error
+	implementLMTPData bool
+	lmtpStatus        []struct {
+		addr string
+		err  error
+	}
+	lmtpStatusSync chan struct{}
+
+	panicOnMail bool
+	userErr     error
 }
 
 func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (smtp.Session, error) {
@@ -33,6 +42,11 @@ func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (sm
 	if username != "username" || password != "password" {
 		return nil, errors.New("Invalid username or password")
 	}
+
+	if be.implementLMTPData {
+		return &lmtpSession{&session{backend: be}}, nil
+	}
+
 	return &session{backend: be}, nil
 }
 
@@ -41,7 +55,15 @@ func (be *backend) AnonymousLogin(_ *smtp.ConnectionState) (smtp.Session, error)
 		return &session{}, be.userErr
 	}
 
+	if be.implementLMTPData {
+		return &lmtpSession{&session{backend: be, anonymous: true}}, nil
+	}
+
 	return &session{backend: be, anonymous: true}, nil
+}
+
+type lmtpSession struct {
+	*session
 }
 
 type session struct {
@@ -59,7 +81,10 @@ func (s *session) Logout() error {
 	return nil
 }
 
-func (s *session) Mail(from string) error {
+func (s *session) Mail(from string, opts smtp.MailOptions) error {
+	if s.backend.panicOnMail {
+		panic("Everything is on fire!")
+	}
 	s.Reset()
 	s.msg.From = from
 	return nil
@@ -81,6 +106,22 @@ func (s *session) Data(r io.Reader) error {
 			s.backend.messages = append(s.backend.messages, s.msg)
 		}
 	}
+	return nil
+}
+
+func (s *session) LMTPData(r io.Reader, collector smtp.StatusCollector) error {
+	if err := s.Data(r); err != nil {
+		return err
+	}
+
+	for _, val := range s.backend.lmtpStatus {
+		collector.SetStatus(val.addr, val.err)
+
+		if s.backend.lmtpStatusSync != nil {
+			s.backend.lmtpStatusSync <- struct{}{}
+		}
+	}
+
 	return nil
 }
 
@@ -219,6 +260,53 @@ func TestServerEmptyFrom2(t *testing.T) {
 
 	io.WriteString(c, "MAIL FROM:<>\r\n")
 	scanner.Scan()
+	if !strings.HasPrefix(scanner.Text(), "250 ") {
+		t.Fatal("Invalid MAIL response:", scanner.Text())
+	}
+
+	return
+}
+
+func TestServerPanicRecover(t *testing.T) {
+	_, s, c, scanner := testServerAuthenticated(t)
+	defer s.Close()
+	defer c.Close()
+
+	s.Backend.(*backend).panicOnMail = true
+	// Don't log panic in tests to not confuse people who run 'go test'.
+	s.ErrorLog = log.New(ioutil.Discard, "", 0)
+
+	io.WriteString(c, "MAIL FROM:<alice@wonderland.book>\r\n")
+	scanner.Scan()
+	if !strings.HasPrefix(scanner.Text(), "421 ") {
+		t.Fatal("Invalid MAIL response:", scanner.Text())
+	}
+
+	return
+}
+
+func TestServerSMTPUTF8(t *testing.T) {
+	_, s, c, scanner := testServerAuthenticated(t)
+	s.EnableSMTPUTF8 = true
+	defer s.Close()
+	defer c.Close()
+
+	io.WriteString(c, "MAIL FROM:<alice@wonderland.book> SMTPUTF8\r\n")
+	scanner.Scan()
+	if !strings.HasPrefix(scanner.Text(), "250 ") {
+		t.Fatal("Invalid MAIL response:", scanner.Text())
+	}
+
+	return
+}
+
+func TestServerSMTPUTF8_Disabled(t *testing.T) {
+	_, s, c, scanner := testServerAuthenticated(t)
+	defer s.Close()
+	defer c.Close()
+
+	io.WriteString(c, "MAIL FROM:<alice@wonderland.book> SMTPUTF8\r\n")
+	scanner.Scan()
 	if strings.HasPrefix(scanner.Text(), "250 ") {
 		t.Fatal("Invalid MAIL response:", scanner.Text())
 	}
@@ -226,12 +314,40 @@ func TestServerEmptyFrom2(t *testing.T) {
 	return
 }
 
-func TestServerBadESMTPVar(t *testing.T) {
+func TestServer8BITMIME(t *testing.T) {
 	_, s, c, scanner := testServerAuthenticated(t)
 	defer s.Close()
 	defer c.Close()
 
-	io.WriteString(c, "MAIL FROM:<alice@wonderland.book> RABBIT\r\n")
+	io.WriteString(c, "MAIL FROM:<alice@wonderland.book> BODY=8BITMIME\r\n")
+	scanner.Scan()
+	if !strings.HasPrefix(scanner.Text(), "250 ") {
+		t.Fatal("Invalid MAIL response:", scanner.Text())
+	}
+
+	return
+}
+
+func TestServer_BODYInvalidValue(t *testing.T) {
+	_, s, c, scanner := testServerAuthenticated(t)
+	defer s.Close()
+	defer c.Close()
+
+	io.WriteString(c, "MAIL FROM:<alice@wonderland.book> BODY=RABIIT\r\n")
+	scanner.Scan()
+	if strings.HasPrefix(scanner.Text(), "250 ") {
+		t.Fatal("Invalid MAIL response:", scanner.Text())
+	}
+
+	return
+}
+
+func TestServerUnknownArg(t *testing.T) {
+	_, s, c, scanner := testServerAuthenticated(t)
+	defer s.Close()
+	defer c.Close()
+
+	io.WriteString(c, "MAIL FROM:<alice@wonderland.book> RABIIT\r\n")
 	scanner.Scan()
 	if strings.HasPrefix(scanner.Text(), "250 ") {
 		t.Fatal("Invalid MAIL response:", scanner.Text())
@@ -431,6 +547,17 @@ func TestServer_tooLongMessage(t *testing.T) {
 	}
 }
 
+func TestServer_tooLongLine(t *testing.T) {
+	_, s, c, scanner := testServerAuthenticated(t)
+	defer s.Close()
+
+	io.WriteString(c, "MAIL FROM:<root@nsa.gov> "+strings.Repeat("A", 2000))
+	scanner.Scan()
+	if !strings.HasPrefix(scanner.Text(), "500 ") {
+		t.Fatal("Invalid response, expected an error but got:", scanner.Text())
+	}
+}
+
 func TestServer_anonymousUserError(t *testing.T) {
 	be, s, c, scanner, _ := testServerEhlo(t)
 	defer s.Close()
@@ -549,53 +676,5 @@ func TestStrictServerBad(t *testing.T) {
 	scanner.Scan()
 	if strings.HasPrefix(scanner.Text(), "250 ") {
 		t.Fatal("Invalid MAIL response:", scanner.Text())
-	}
-}
-
-func TestServer_lmtpOK(t *testing.T) {
-	be, s, c, scanner := testServerGreeted(t, func(s *smtp.Server) {
-		s.LMTP = true
-	})
-	defer s.Close()
-	defer c.Close()
-
-	io.WriteString(c, "LHLO localhost\r\n")
-
-	scanner.Scan()
-	if scanner.Text() != "250-Hello localhost" {
-		t.Fatal("Invalid LHLO response:", scanner.Text())
-	}
-
-	for scanner.Scan() {
-		s := scanner.Text()
-
-		if strings.HasPrefix(s, "250 ") {
-			break
-		} else if !strings.HasPrefix(s, "250-") {
-			t.Fatal("Invalid capability response:", s)
-		}
-	}
-
-	io.WriteString(c, "MAIL FROM:<root@nsa.gov>\r\n")
-	scanner.Scan()
-	io.WriteString(c, "RCPT TO:<root@gchq.gov.uk>\r\n")
-	scanner.Scan()
-	io.WriteString(c, "RCPT TO:<root@bnd.bund.de>\r\n")
-	scanner.Scan()
-	io.WriteString(c, "DATA\r\n")
-	scanner.Scan()
-	io.WriteString(c, "Hey <3\r\n")
-	io.WriteString(c, ".\r\n")
-	scanner.Scan()
-
-	if !strings.HasPrefix(scanner.Text(), "250 ") {
-		t.Fatal("Invalid DATA first response:", scanner.Text())
-	}
-	if !strings.HasPrefix(scanner.Text(), "250 ") {
-		t.Fatal("Invalid DATA second response:", scanner.Text())
-	}
-
-	if len(be.messages) != 0 || len(be.anonmsgs) != 1 {
-		t.Fatal("Invalid number of sent messages:", be.messages, be.anonmsgs)
 	}
 }

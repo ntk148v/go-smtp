@@ -41,7 +41,7 @@ func TestClientAuthTrimSpace(t *testing.T) {
 	c.didHello = true
 	c.Auth(toServerEmptyAuth{})
 	c.Close()
-	if got, want := wrote.String(), "AUTH FOOAUTH\r\n*\r\nQUIT\r\n"; got != want {
+	if got, want := wrote.String(), "AUTH FOOAUTH\r\n*\r\n"; got != want {
 		t.Errorf("wrote %q; want %q", got, want)
 	}
 }
@@ -99,7 +99,7 @@ func TestBasic(t *testing.T) {
 		t.Fatalf("Shouldn't support DSN")
 	}
 
-	if err := c.Mail("user@gmail.com"); err == nil {
+	if err := c.Mail("user@gmail.com", nil); err == nil {
 		t.Fatalf("MAIL should require authentication")
 	}
 
@@ -123,10 +123,10 @@ func TestBasic(t *testing.T) {
 	if err := c.Rcpt("golang-nuts@googlegroups.com>\r\nDATA\r\nInjected message body\r\n.\r\nQUIT\r\n"); err == nil {
 		t.Fatalf("RCPT should have failed due to a message injection attempt")
 	}
-	if err := c.Mail("user@gmail.com>\r\nDATA\r\nAnother injected message body\r\n.\r\nQUIT\r\n"); err == nil {
+	if err := c.Mail("user@gmail.com>\r\nDATA\r\nAnother injected message body\r\n.\r\nQUIT\r\n", nil); err == nil {
 		t.Fatalf("MAIL should have failed due to a message injection attempt")
 	}
-	if err := c.Mail("user@gmail.com"); err != nil {
+	if err := c.Mail("user@gmail.com", nil); err != nil {
 		t.Fatalf("MAIL failed: %s", err)
 	}
 	if err := c.Rcpt("golang-nuts@googlegroups.com"); err != nil {
@@ -158,6 +158,112 @@ Goodbye.`
 	actualcmds := cmdbuf.String()
 	if client != actualcmds {
 		t.Fatalf("Got:\n%s\nExpected:\n%s", actualcmds, client)
+	}
+}
+
+func TestBasic_SMTPError(t *testing.T) {
+	faultyServer := `220 mx.google.com at your service
+250-mx.google.com at your service
+250 ENHANCEDSTATUSCODES
+500 5.0.0 Failing with enhanced code
+500 Failing without enhanced code`
+	// RFC 2034 says that enhanced codes *SHOULD* be included in errors,
+	// this means it can be violated hence we need to handle last
+	// case properly.
+
+	faultyServer = strings.Join(strings.Split(faultyServer, "\n"), "\r\n")
+
+	var wrote bytes.Buffer
+	var fake faker
+	fake.ReadWriter = struct {
+		io.Reader
+		io.Writer
+	}{
+		strings.NewReader(faultyServer),
+		&wrote,
+	}
+	c, err := NewClient(fake, "fake.host")
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	err = c.Mail("whatever", nil)
+	if err == nil {
+		t.Fatal("MAIL succeded")
+	}
+	smtpErr, ok := err.(*SMTPError)
+	if !ok {
+		t.Fatal("Returned error is not SMTPError")
+	}
+	if smtpErr.Code != 500 {
+		t.Fatalf("Wrong status code, got %d, want %d", smtpErr.Code, 500)
+	}
+	if smtpErr.EnhancedCode != (EnhancedCode{5, 0, 0}) {
+		t.Fatalf("Wrong enhanced code, got %v, want %v", smtpErr.EnhancedCode, EnhancedCode{5, 0, 0})
+	}
+	if smtpErr.Message != "Failing with enhanced code" {
+		t.Fatalf("Wrong message, got %s, want %s", smtpErr.Message, "Failing with enhanced code")
+	}
+
+	err = c.Mail("whatever", nil)
+	if err == nil {
+		t.Fatal("MAIL succeded")
+	}
+	smtpErr, ok = err.(*SMTPError)
+	if !ok {
+		t.Fatal("Returned error is not SMTPError")
+	}
+	if smtpErr.Code != 500 {
+		t.Fatalf("Wrong status code, got %d, want %d", smtpErr.Code, 500)
+	}
+	if smtpErr.Message != "Failing without enhanced code" {
+		t.Fatalf("Wrong message, got %s, want %s", smtpErr.Message, "Failing without enhanced code")
+	}
+}
+
+func TestClient_TooLongLine(t *testing.T) {
+	faultyServer := []string{
+		"220 mx.google.com at your service\r\n",
+		"220 mx.google.com at your service\r\n",
+		"500 5.0.0 nU6XC5JJUfiuIkC7NhrxZz36Rl/rXpkfx9QdeZJ+rno6W5J9k9HvniyWXBBi1gOZ/CUXEI6K7Uony70eiVGGGkdFhP1rEvMGny1dqIRo3NM2NifrvvLIKGeX6HrYmkc7NMn9BwHyAnt5oLe5eNVDI+grwIikVPNVFZi0Dg4Xatdg5Cs8rH1x9BWhqyDoxosJst4wRoX4AymYygUcftM3y16nVg/qcb1GJwxSNbah7VjOiSrk6MlTdGR/2AwIIcSw7pZVJjGbCorniOTvKBcyut1YdbrX/4a/dBhvLfZtdSccqyMZAdZno+tGrnu+N2ghFvz6cx6bBab9Z4JJQMlkK/g1y7xjEPr6nKwruAf71NzOclPK5wzs2hY3Ku9xEjU0Cd+g/OjAzVsmeJk2U0q+vmACZsFAiOlRynXKFPLqMAg8skM5lioRTm05K/u3aBaUq0RKloeBHZ/zNp/kfHNp6TmJKAzvsXD3Xdo+PRAgCZRTRAl3ydGdrOOjxTULCVlgOL6xSAJdj9zGkzQoEW4tRmp1OiIab4GSxCtkIo7XnAowJ7EPUfDGTV3hhl5Qn7jvZjPCPlruRTtzVTho7D3HBEouWv1qDsqdED23myw0Ma9ZlobSf9eHqsSv1MxjKG2D5DdFBACu6pXGz3ceGreOHYWnI74TkoHtQ5oNuF6VUkGjGN+f4fOaiypQ54GJ8skTNoSCHLK4XF8ZutSxWzMR+LKoJBWMb6bdAiFNt+vXZOUiTgmTqs6Sw79JXqDX9YFxryJMKjHMiFkm+RZbaK5sIOXqyq+RNmOJ+G0unrQHQMCES476c7uvOlYrNoJtq+uox1qFdisIE/8vfSoKBlTtw+r2m87djIQh4ip/hVmalvtiF5fnVTxigbtwLWv8rAOCXKoktU0c2ie0a5hGtvZT0SXxwX8K2CeYXb81AFD2IaLt/p8Q4WuZ82eOCeXP72qP9yWYj6mIZdgyimm8wjrDowt2yPJU28ZD6k3Ei6C31OKgMpCf8+MW504/VCwld7czAIwjJiZe3DxtUdfM7Q565OzLiWQgI8fxjsvlCKMiOY7q42IGGsVxXJAFMtDKdchgqQA1PJR1vrw+SbI3Mh4AGnn8vKn+WTsieB3qkloo7MZlpMz/bwPXg7XadOVkUaVeHrZ5OsqDWhsWOLtPZLi5XdNazPzn9uxWbpelXEBKAjZzfoawSUgGT5vCYACNfz/yIw1DB067N+HN1KvVddI6TNBA32lpqkQ6VwdWztq6pREE51sNl9p7MUzr+ef0331N5DqQsy+epmRDwebosCx15l/rpvBc91OnxmMMXDNtmxSzVxaZjyGDmJ7RDdTy/Su76AlaMP1zxivxg2MU/9zyTzM16coIAMOd/6Uo9ezKgbZEPeMROKTzAld9BhK9BBPWofoQ0mBkVc7btnahQe3u8HoD6SKCkr9xcTcC9ZKpLkc4svrmxT9e0858pjhis9BbWD/owa6552n2+KwUMRyB8ys7rPL86hh9lBTS+05cVL+BmJfNHOA6ZizdGc3lpwIVbFmzMR5BM0HRf3OCntkWojgsdsP8BGZWHiCGGqA7YGa5AOleR887r8Zhyp47DT3Cn3Rg/icYurIx7Yh0p696gxfANo4jEkE2BOroIscDnhauwck5CCJMcabpTrGwzK8NJ+xZnCUplXnZiIaj85Uh9+yI670B4bybWlZoVmALUxxuQ8bSMAp7CAzMcMWbYJHwBqLF8V2qMj3/g81S3KOptn8b7Idh7IMzAkV8VxE3qAguzwS0zEu8l894sOFUPiJq2/llFeiHNOcEQUGJ+8ATJSAFOMDXAeQS2FoIDOYdesO6yacL0zUkvDydWbA84VXHW8DvdHPli/8hmc++dn5CXSDeBJfC/yypvrpLgkSilZMuHEYHEYHEYEHYEHEYEHEYEHEYEYEYEYEYEYEYEYEYEYEYEYEYEYEYEYEYEYEYYEYEYEYEYEYEYEYYEYEYEYEYEYEYEYEY\r\n",
+		"220 2.0.0 Kk\r\n",
+	}
+
+	// The pipe is used to avoid bufio.Reader reading the too long line ahead
+	// of time (in NewClient) and failing eariler than we expect.
+	pr, pw := io.Pipe()
+
+	go func() {
+		for _, l := range faultyServer {
+			pw.Write([]byte(l))
+		}
+		pw.Close()
+	}()
+
+	var wrote bytes.Buffer
+	var fake faker
+	fake.ReadWriter = struct {
+		io.Reader
+		io.Writer
+	}{
+		pr,
+		&wrote,
+	}
+	c, err := NewClient(fake, "fake.host")
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	err = c.Mail("whatever", nil)
+	if err != ErrTooLongLine {
+		t.Fatal("MAIL succeded or returned a different error:", err)
+	}
+
+	// ErrTooLongLine is "sticky" since the connection is in broken state and
+	// the only reasonable way to recover is to close it.
+	err = c.Mail("whatever", nil)
+	if err != ErrTooLongLine {
+		t.Fatal("Second MAIL succeded or returned a different error:", err)
 	}
 }
 
@@ -315,7 +421,7 @@ func TestHello(t *testing.T) {
 			err = c.Hello("customhost")
 		case 1:
 			err = c.StartTLS(nil)
-			if err.Error() == "502 Not implemented" {
+			if err.Error() == "Not implemented" {
 				err = nil
 			}
 		case 2:
@@ -325,7 +431,7 @@ func TestHello(t *testing.T) {
 			c.serverName = "smtp.google.com"
 			err = c.Auth(sasl.NewPlainClient("", "user", "pass"))
 		case 4:
-			err = c.Mail("test@example.com")
+			err = c.Mail("test@example.com", nil)
 		case 5:
 			ok, _ := c.Extension("feature")
 			if ok {
@@ -561,8 +667,8 @@ func TestAuthFailed(t *testing.T) {
 
 	if err == nil {
 		t.Error("Auth: expected error; got none")
-	} else if err.Error() != "535 Invalid credentials\nplease see www.example.com" {
-		t.Errorf("Auth: got error: %v, want: %s", err, "535 Invalid credentials\nplease see www.example.com")
+	} else if err.Error() != "Invalid credentials\nplease see www.example.com" {
+		t.Errorf("Auth: got error: %v, want: %s", err, "Invalid credentials\nplease see www.example.com")
 	}
 
 	bcmdbuf.Flush()
@@ -583,7 +689,6 @@ var authFailedServer = `220 hello world
 var authFailedClient = `EHLO localhost
 AUTH PLAIN AHVzZXIAcGFzcw==
 *
-QUIT
 `
 
 func TestTLSClient(t *testing.T) {
@@ -791,7 +896,7 @@ func TestLMTP(t *testing.T) {
 	}
 	c.didHello = true
 
-	if err := c.Mail("user@gmail.com"); err != nil {
+	if err := c.Mail("user@gmail.com", nil); err != nil {
 		t.Fatalf("MAIL failed: %s", err)
 	}
 	if err := c.Rcpt("golang-nuts@googlegroups.com"); err != nil {
