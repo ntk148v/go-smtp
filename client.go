@@ -456,12 +456,20 @@ var testHookStartTLS func(*tls.Config) // nil, except for tests
 // messages is accomplished by including an email address in the to
 // parameter but not including it in the r headers.
 //
+<<<<<<< HEAD
 // The SendMail function and the net/smtp package are low-level
 // mechanisms and provide no support for DKIM signing, MIME
 // attachments (see the mime/multipart package), or other mail
 // functionality. Higher-level packages exist outside of the standard
 // library.
 func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader, useTLS bool) error {
+=======
+// The SendMail function and the go-smtp package are low-level
+// mechanisms and provide no support for DKIM signing (see go-msgauth), MIME
+// attachments (see the mime/multipart package or the go-message package), or
+// other mail functionality.
+func SendMail(addr string, a sasl.Client, from string, to []string, r io.Reader) error {
+>>>>>>> 5abcd81... client: remove mention of net/smtp
 	if err := validateLine(from); err != nil {
 		return err
 	}
